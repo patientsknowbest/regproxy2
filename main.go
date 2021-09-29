@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -19,11 +21,19 @@ var (
 func proxy(resp http.ResponseWriter, req *http.Request) {
 	rc := make(chan *http.Response)
 	ec := make(chan error)
+	// Read in the whole body, we'll need a new reader for each upstream
+	b, e := io.ReadAll(req.Body)
+	if e != nil {
+		resp.WriteHeader(500)
+		resp.Write([]byte(e.Error()))
+		return
+	}
+
 	for name, callback := range upstreams {
 		go func(name, callback string) {
 			req2 := req.Clone(req.Context())
 			req2.RequestURI = "" // Isn't allowed to be set on client requests
-
+			req2.Body = io.NopCloser(bytes.NewReader(b))
 			// Re-target it to the upstream
 			u, err := url.Parse(callback)
 			if err != nil {
