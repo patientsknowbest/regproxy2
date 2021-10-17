@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"time"
 
@@ -98,44 +99,44 @@ func register(resp http.ResponseWriter, req *http.Request) {
 	resp.WriteHeader(204)
 }
 
-func mustParseDuration(text string) time.Duration {
-	dur, err := time.ParseDuration(text)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return dur
-}
-
 func main() {
 	hostPtr := flag.String("host", "0.0.0.0", "The host to bind to")
 	portPtr := flag.Int("port", 9876, "The port to bind to")
-	srtPtr := flag.String("server-read-timeout", "1s", "server read timeout")
-	swtPtr := flag.String("server-write-timeout", "40s", "server write timeout")
-	chtPtr := flag.String("client-http-timeout", "40s", "client timeout (for upstreams)")
-	cdtPtr := flag.String("client-dial-timeout", "1s", "client dialer timeout")
-	ckaiPtr := flag.String("client-keep-alive-interval", "-1s", "client keep-alive interval")
+	srtPtr := flag.Duration("server-read-timeout", 1*time.Second, "server read timeout")
+	swtPtr := flag.Duration("server-write-timeout", 40*time.Second, "server write timeout")
+	chtPtr := flag.Duration("client-http-timeout", 40*time.Second, "client timeout (for upstreams)")
+	cdtPtr := flag.Duration("client-dial-timeout", 1*time.Second, "client dialer timeout")
+	ckaiPtr := flag.Duration("client-keep-alive-interval", -1*time.Second, "client keep-alive interval")
 	cmicPtr := flag.Int64("client-max-idle-conns", 1, "client max idle connections (for connection pooling)")
-	cmitPtr := flag.String("client-max-idle-timeout", "1s", "client idle connection timeout (for connection pooling)")
+	cmitPtr := flag.Duration("client-max-idle-timeout", 1*time.Second, "client idle connection timeout (for connection pooling)")
 	useDnsCachePtr := flag.Bool("use-dns-cache", true, "use an internal DNS cache")
-	dnsCacheRefresh := flag.String("dns-cache-refresh", "100h", "interval for refrshing DNS cache")
-	dnsLookupTimeout := flag.String("dns-lookup-timeout", "5s", "timeout for DNS lookups")
+	dnsCacheRefresh := flag.Duration("dns-cache-refresh", 100*time.Hour, "interval for refrshing DNS cache")
+	dnsLookupTimeout := flag.Duration("dns-lookup-timeout", 5*time.Second, "timeout for DNS lookups")
 	flag.Parse()
+
+	log.Println("Starting regproxy with args")
+	log.Println(os.Args)
 
 	upstreams = make(map[string]*url.URL)
 
 	dc := (&net.Dialer{
-		Timeout:   mustParseDuration(*cdtPtr),
-		KeepAlive: mustParseDuration(*ckaiPtr),
+		Timeout:   *cdtPtr,
+		KeepAlive: *ckaiPtr,
 	}).DialContext
 
 	// Use a caching DNS resolver
 	// https://www.reddit.com/r/golang/comments/9wk812/go_package_for_caching_dns_lookup_results_in/
 	if *useDnsCachePtr {
-		resolver, err := dnscache.New(mustParseDuration(*dnsCacheRefresh), mustParseDuration(*dnsLookupTimeout), zap.NewNop())
+		logger, err := zap.NewDevelopment()
+		if err != nil {
+			log.Fatal(err)
+		}
+		resolver, err := dnscache.New(*dnsCacheRefresh, *dnsLookupTimeout, logger)
 		if err != nil {
 			log.Fatal(err)
 		}
 		dc = dnscache.DialFunc(resolver, dc)
+		log.Printf("Using DNS cache")
 	}
 
 	client = &http.Client{
@@ -143,9 +144,9 @@ func main() {
 			Proxy:           http.ProxyFromEnvironment,
 			DialContext:     dc,
 			MaxIdleConns:    int(*cmicPtr),
-			IdleConnTimeout: mustParseDuration(*cmitPtr),
+			IdleConnTimeout: *cmitPtr,
 		},
-		Timeout: mustParseDuration(*chtPtr),
+		Timeout: *chtPtr,
 	}
 	sm := http.NewServeMux()
 	sm.HandleFunc("/register", register)
@@ -153,8 +154,8 @@ func main() {
 	srv := http.Server{
 		Addr:         net.JoinHostPort(*hostPtr, strconv.Itoa(*portPtr)),
 		Handler:      sm,
-		ReadTimeout:  mustParseDuration(*srtPtr),
-		WriteTimeout: mustParseDuration(*swtPtr),
+		ReadTimeout:  *srtPtr,
+		WriteTimeout: *swtPtr,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
