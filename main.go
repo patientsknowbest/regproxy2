@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	dnscache "go.mercari.io/go-dnscache"
-	"go.uber.org/zap"
 	"io"
 	"log"
 	"net"
@@ -14,11 +12,14 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	dnscache "go.mercari.io/go-dnscache"
+	"go.uber.org/zap"
 )
 
 var (
 	client    *http.Client
-	upstreams map[string]string
+	upstreams map[string]*url.URL
 )
 
 func proxy(resp http.ResponseWriter, req *http.Request) {
@@ -33,18 +34,13 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 	}
 
 	for name, callback := range upstreams {
-		go func(name, callback string) {
+		go func(name string, callback *url.URL) {
 			req2 := req.Clone(req.Context())
 			req2.RequestURI = "" // Isn't allowed to be set on client requests
 			req2.Body = io.NopCloser(bytes.NewReader(b))
 			// Re-target it to the upstream
-			u, err := url.Parse(callback)
-			if err != nil {
-				ec <- err
-				return
-			}
-			req2.URL.Host = u.Host
-			req2.URL.Scheme = u.Scheme
+			req2.URL.Host = callback.Host
+			req2.URL.Scheme = callback.Scheme
 			log.Printf("Forwarding request %s to upstream %s at %s", req2.URL.Path, name, callback)
 			resp2, err := client.Do(req2)
 
@@ -96,8 +92,9 @@ func register(resp http.ResponseWriter, req *http.Request) {
 		resp.Write([]byte(err.Error()))
 		return
 	}
-	log.Printf("Adding upstream %v", q)
-	upstreams[q.Name] = q.Callback
+	upstream, err := url.Parse(q.Callback)
+	log.Printf("Adding upstream %v", upstream)
+	upstreams[q.Name] = upstream
 	resp.WriteHeader(204)
 }
 
@@ -124,7 +121,7 @@ func main() {
 	dnsLookupTimeout := flag.String("dns-lookup-timeout", "5s", "timeout for DNS lookups")
 	flag.Parse()
 
-	upstreams = make(map[string]string)
+	upstreams = make(map[string]*url.URL)
 
 	dc := (&net.Dialer{
 		Timeout:   mustParseDuration(*cdtPtr),
@@ -153,7 +150,7 @@ func main() {
 	sm := http.NewServeMux()
 	sm.HandleFunc("/register", register)
 	sm.HandleFunc("/", proxy)
-	srv := http.Server {
+	srv := http.Server{
 		Addr:         net.JoinHostPort(*hostPtr, strconv.Itoa(*portPtr)),
 		Handler:      sm,
 		ReadTimeout:  mustParseDuration(*srtPtr),
