@@ -26,17 +26,34 @@ func isSuccess(r *http.Response) bool {
 	return r.StatusCode >= 200 && r.StatusCode < 400
 }
 
+func badRequest(resp http.ResponseWriter, errMsg string) {
+	resp.WriteHeader(400)
+	resp.Write([]byte(errMsg))
+}
+
+func errResp(resp http.ResponseWriter, e error) {
+	resp.WriteHeader(500)
+	resp.Write([]byte(e.Error()))
+}
+
 func proxy(resp http.ResponseWriter, req *http.Request) {
 	rc := make(chan *http.Response)
 	ec := make(chan error)
-	// Read in the whole body, we'll need a new reader for each upstream
-	b, e := io.ReadAll(req.Body)
-	if e != nil {
-		resp.WriteHeader(500)
-		resp.Write([]byte(e.Error()))
+
+	// Validate the request
+	if len(upstreams) < 1 {
+		badRequest(resp, "No upstreams registered")
 		return
 	}
 
+	// Read in the whole body, we'll need a new reader for each upstream
+	b, e := io.ReadAll(req.Body)
+	if e != nil {
+		errResp(resp, e)
+		return
+	}
+
+	// Call upstreams in parallel
 	for name, callback := range upstreams {
 		go func(name string, callback *url.URL) {
 			// Note although there is an existing
@@ -60,11 +77,6 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 			}
 		}(name, callback)
 	}
-	if len(upstreams) < 1 {
-		resp.WriteHeader(400)
-		resp.Write([]byte("No upstreams registered"))
-		return
-	}
 	var latestSuccess *http.Response
 	var latestErr *http.Response
 	dc := req.Context().Done()
@@ -79,19 +91,18 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 				latestErr = latest
 			}
 		case e = <-ec:
+		// If our own client cancelled, we should stop waiting
 		case _ = <-dc:
-			resp.WriteHeader(500)
-			resp.Write([]byte(req.Context().Err().Error()))
+			errResp(resp, req.Context().Err())
 			return
 		}
 	}
 	// Any errors, oopsie
 	if e != nil {
-		resp.WriteHeader(500)
-		resp.Write([]byte(e.Error()))
+		errResp(resp, e)
 		return
 	}
-	// Always return the non-success response instead, if we got one
+	// Prefer to return non-success responses
 	var rr = latestSuccess
 	if latestErr != nil {
 		rr = latestErr
@@ -109,11 +120,14 @@ func register(resp http.ResponseWriter, req *http.Request) {
 	var q upstream
 	err := json.NewDecoder(req.Body).Decode(&q)
 	if err != nil {
-		resp.WriteHeader(400)
-		resp.Write([]byte(err.Error()))
+		badRequest(resp, err.Error())
 		return
 	}
 	upstream, err := url.Parse(q.Callback)
+	if err != nil {
+		badRequest(resp, err.Error())
+		return
+	}
 	log.Printf("Adding upstream %v", q)
 	upstreams[q.Name] = upstream
 	resp.WriteHeader(204)
