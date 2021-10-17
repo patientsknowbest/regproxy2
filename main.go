@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -23,6 +22,10 @@ var (
 	upstreams map[string]*url.URL
 )
 
+func isSuccess(r *http.Response) bool {
+	return r.StatusCode >= 200 && r.StatusCode < 400
+}
+
 func proxy(resp http.ResponseWriter, req *http.Request) {
 	rc := make(chan *http.Response)
 	ec := make(chan error)
@@ -36,10 +39,13 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 
 	for name, callback := range upstreams {
 		go func(name string, callback *url.URL) {
+			// Note although there is an existing
+			// net/http/httputil.ReverseProxy implementation, it doesn't let us
+			// forward to _multiple_ upstreams and choose a response based on header
+			// so we can't use it here unfortunately
 			req2 := req.Clone(req.Context())
 			req2.RequestURI = "" // Isn't allowed to be set on client requests
 			req2.Body = io.NopCloser(bytes.NewReader(b))
-			// Re-target it to the upstream
 			req2.URL.Host = callback.Host
 			req2.URL.Scheme = callback.Scheme
 			log.Printf("Forwarding request %s to upstream %s at %s", req2.URL.Path, name, callback)
@@ -48,8 +54,6 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 			if err != nil {
 				log.Printf("Error forwarding request %s to upstream %s at %s: %v", req2.URL.Path, name, callback, err)
 				ec <- err
-			} else if resp2.StatusCode < 200 || resp2.StatusCode > 399 {
-				ec <- fmt.Errorf("Got unexpected status code %d from upstream", resp2.StatusCode)
 			} else {
 				log.Printf("Success forwarding request %s to upstream %s at %s: %v", req2.URL.Path, name, callback, resp2.StatusCode)
 				rc <- resp2
@@ -61,23 +65,39 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 		resp.Write([]byte("No upstreams registered"))
 		return
 	}
-	var latest *http.Response
+	var latestSuccess *http.Response
+	var latestErr *http.Response
 	dc := req.Context().Done()
-	for _, _ = range upstreams {
+	// Wait for _all_ the responses, it's interesting to know which ones succeeded and
+	// which ones failed during a single call.
+	for range upstreams {
 		select {
-		case latest = <-rc:
-		case e := <-ec:
-			resp.WriteHeader(500)
-			resp.Write([]byte(e.Error()))
-			return
+		case latest := <-rc:
+			if isSuccess(latest) {
+				latestSuccess = latest
+			} else {
+				latestErr = latest
+			}
+		case e = <-ec:
 		case _ = <-dc:
 			resp.WriteHeader(500)
 			resp.Write([]byte(req.Context().Err().Error()))
 			return
 		}
 	}
-	resp.WriteHeader(latest.StatusCode)
-	latest.Write(resp)
+	// Any errors, oopsie
+	if e != nil {
+		resp.WriteHeader(500)
+		resp.Write([]byte(e.Error()))
+		return
+	}
+	// Always return the non-success response instead, if we got one
+	var rr = latestSuccess
+	if latestErr != nil {
+		rr = latestErr
+	}
+	resp.WriteHeader(rr.StatusCode)
+	rr.Write(resp)
 }
 
 type upstream struct {
@@ -94,7 +114,7 @@ func register(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 	upstream, err := url.Parse(q.Callback)
-	log.Printf("Adding upstream %v", upstream)
+	log.Printf("Adding upstream %v", q)
 	upstreams[q.Name] = upstream
 	resp.WriteHeader(204)
 }
