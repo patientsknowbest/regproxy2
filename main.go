@@ -17,11 +17,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	client    *http.Client
-	upstreams map[string]*url.URL
-)
-
 func isSuccess(r *http.Response) bool {
 	return r.StatusCode >= 200 && r.StatusCode < 400
 }
@@ -36,12 +31,18 @@ func errResp(resp http.ResponseWriter, e error) {
 	resp.Write([]byte(e.Error()))
 }
 
-func proxy(resp http.ResponseWriter, req *http.Request) {
+type RegProxy struct {
+	client    *http.Client
+	upstreams map[string]*url.URL
+	handler   http.Handler
+}
+
+func (self *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 	rc := make(chan *http.Response)
 	ec := make(chan error)
 
 	// Validate the request
-	if len(upstreams) < 1 {
+	if len(self.upstreams) < 1 {
 		badRequest(resp, "No upstreams registered")
 		return
 	}
@@ -54,7 +55,7 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 	}
 
 	// Call upstreams in parallel
-	for name, callback := range upstreams {
+	for name, callback := range self.upstreams {
 		go func(name string, callback *url.URL) {
 			// Note although there is an existing
 			// net/http/httputil.ReverseProxy implementation, it doesn't let us
@@ -66,7 +67,7 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 			req2.URL.Host = callback.Host
 			req2.URL.Scheme = callback.Scheme
 			log.Printf("Forwarding request %s to upstream %s at %s", req2.URL.Path, name, callback)
-			resp2, err := client.Do(req2)
+			resp2, err := self.client.Do(req2)
 
 			if err != nil {
 				log.Printf("Error forwarding request %s to upstream %s at %s: %v", req2.URL.Path, name, callback, err)
@@ -82,7 +83,7 @@ func proxy(resp http.ResponseWriter, req *http.Request) {
 	dc := req.Context().Done()
 	// Wait for _all_ the responses, it's interesting to know which ones succeeded and
 	// which ones failed during a single call.
-	for range upstreams {
+	for range self.upstreams {
 		select {
 		case latest := <-rc:
 			if isSuccess(latest) {
@@ -116,7 +117,7 @@ type upstream struct {
 	Callback string `json:"callback"`
 }
 
-func register(resp http.ResponseWriter, req *http.Request) {
+func (self *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 	var q upstream
 	err := json.NewDecoder(req.Body).Decode(&q)
 	if err != nil {
@@ -125,37 +126,20 @@ func register(resp http.ResponseWriter, req *http.Request) {
 	}
 	upstream, err := url.Parse(q.Callback)
 	if err != nil {
+		log.Println("Failed to parse URL")
 		badRequest(resp, err.Error())
 		return
 	}
 	log.Printf("Adding upstream %v", q)
-	upstreams[q.Name] = upstream
+	self.upstreams[q.Name] = upstream
 	resp.WriteHeader(204)
 }
 
-func main() {
-	hostPtr := flag.String("host", "0.0.0.0", "The host to bind to")
-	portPtr := flag.Int("port", 9876, "The port to bind to")
-	srtPtr := flag.Duration("server-read-timeout", 1*time.Second, "server read timeout")
-	swtPtr := flag.Duration("server-write-timeout", 40*time.Second, "server write timeout")
-	chtPtr := flag.Duration("client-http-timeout", 40*time.Second, "client timeout (for upstreams)")
-	cdtPtr := flag.Duration("client-dial-timeout", 1*time.Second, "client dialer timeout")
-	ckaiPtr := flag.Duration("client-keep-alive-interval", -1*time.Second, "client keep-alive interval")
-	cmicPtr := flag.Int64("client-max-idle-conns", 1, "client max idle connections (for connection pooling)")
-	cmitPtr := flag.Duration("client-max-idle-timeout", 1*time.Second, "client idle connection timeout (for connection pooling)")
-	useDnsCachePtr := flag.Bool("use-dns-cache", true, "use an internal DNS cache")
-	dnsCacheRefresh := flag.Duration("dns-cache-refresh", 100*time.Hour, "interval for refrshing DNS cache")
-	dnsLookupTimeout := flag.Duration("dns-lookup-timeout", 5*time.Second, "timeout for DNS lookups")
-	flag.Parse()
-
-	log.Println("Starting regproxy with args")
-	log.Println(os.Args)
-
-	upstreams = make(map[string]*url.URL)
-
+func NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, dnsCacheRefresh, dnsLookupTimeout, clientMaxIdleTimeout *time.Duration,
+	clientMaxIdleConnections *int64, useDnsCachePtr *bool) *RegProxy {
 	dc := (&net.Dialer{
-		Timeout:   *cdtPtr,
-		KeepAlive: *ckaiPtr,
+		Timeout:   *clientDialTimeout,
+		KeepAlive: *clientKeepAliveInterval,
 	}).DialContext
 
 	// Use a caching DNS resolver
@@ -172,24 +156,51 @@ func main() {
 		dc = dnscache.DialFunc(resolver, dc)
 		log.Printf("Using DNS cache")
 	}
-
-	client = &http.Client{
+	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy:           http.ProxyFromEnvironment,
 			DialContext:     dc,
-			MaxIdleConns:    int(*cmicPtr),
-			IdleConnTimeout: *cmitPtr,
+			MaxIdleConns:    int(*clientMaxIdleConnections),
+			IdleConnTimeout: *clientMaxIdleTimeout,
 		},
-		Timeout: *chtPtr,
+		Timeout: *clientHttpTimeout,
+	}
+	rp := &RegProxy{
+		upstreams: make(map[string]*url.URL),
+		client:    client,
 	}
 	sm := http.NewServeMux()
-	sm.HandleFunc("/register", register)
-	sm.HandleFunc("/", proxy)
+	sm.HandleFunc("/register", rp.register)
+	sm.HandleFunc("/", rp.proxy)
+	rp.handler = sm
+	return rp
+}
+
+func main() {
+	hostPtr := flag.String("host", "0.0.0.0", "The host to bind to")
+	portPtr := flag.Int("port", 9876, "The port to bind to")
+	serverReadTimeout := flag.Duration("server-read-timeout", 1*time.Second, "server read timeout")
+	serverWriteTimeout := flag.Duration("server-write-timeout", 40*time.Second, "server write timeout")
+	clientHttpTimeout := flag.Duration("client-http-timeout", 40*time.Second, "client timeout (for upstreams)")
+	clientDialTimeout := flag.Duration("client-dial-timeout", 1*time.Second, "client dialer timeout")
+	clientKeepAliveInterval := flag.Duration("client-keep-alive-interval", -1*time.Second, "client keep-alive interval")
+	clientMaxIdleConnections := flag.Int64("client-max-idle-conns", 1, "client max idle connections (for connection pooling)")
+	clientMaxIdleTimeout := flag.Duration("client-max-idle-timeout", 1*time.Second, "client idle connection timeout (for connection pooling)")
+	useDnsCachePtr := flag.Bool("use-dns-cache", true, "use an internal DNS cache")
+	dnsCacheRefresh := flag.Duration("dns-cache-refresh", 100*time.Hour, "interval for refrshing DNS cache")
+	dnsLookupTimeout := flag.Duration("dns-lookup-timeout", 5*time.Second, "timeout for DNS lookups")
+	flag.Parse()
+
+	log.Println("Starting regproxy with args")
+	log.Println(os.Args)
+
+	rp := NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, dnsCacheRefresh, dnsLookupTimeout, clientMaxIdleTimeout, clientMaxIdleConnections, useDnsCachePtr)
+
 	srv := http.Server{
 		Addr:         net.JoinHostPort(*hostPtr, strconv.Itoa(*portPtr)),
-		Handler:      sm,
-		ReadTimeout:  *srtPtr,
-		WriteTimeout: *swtPtr,
+		Handler:      rp.handler,
+		ReadTimeout:  *serverReadTimeout,
+		WriteTimeout: *serverWriteTimeout,
 	}
 	log.Fatal(srv.ListenAndServe())
 }
