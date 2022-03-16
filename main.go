@@ -135,6 +135,13 @@ func (self *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 	resp.WriteHeader(204)
 }
 
+func (self *RegProxy) health(resp http.ResponseWriter, req *http.Request) {
+	// https://inadarei.github.io/rfc-healthcheck/
+	resp.WriteHeader(200)
+	resp.Header().Add("Content-Type", "application/health+json")
+	resp.Write([]byte(`{"status": "pass"}`))
+}
+
 func NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, dnsCacheRefresh, dnsLookupTimeout, clientMaxIdleTimeout *time.Duration,
 	clientMaxIdleConnections *int64, useDnsCachePtr *bool) *RegProxy {
 	dc := (&net.Dialer{
@@ -170,6 +177,7 @@ func NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, 
 		client:    client,
 	}
 	sm := http.NewServeMux()
+	sm.HandleFunc("/health", rp.health)
 	sm.HandleFunc("/register", rp.register)
 	sm.HandleFunc("/", rp.proxy)
 	rp.handler = sm
