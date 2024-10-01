@@ -4,5 +4,5 @@
 
 ## Increment this number when you push a new image
 VERSION=4
-docker build . -t "eu.gcr.io/infra-240614/regproxy2:$VERSION"
-docker push "eu.gcr.io/infra-240614/regproxy2:$VERSION"
+docker build . -t "europe-docker.pkg.dev/infra-240614/eu.gcr.io/regproxy2:$VERSION"
+docker push "europe-docker.pkg.dev/infra-240614/eu.gcr.io/regproxy2:$VERSION"
