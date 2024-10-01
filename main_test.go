@@ -2,7 +2,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +64,32 @@ func TestRegister(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConcurrentRegister(t *testing.T) {
+	errorGroup, _ := errgroup.WithContext(context.Background())
+
+	withRegProxy(t, func(url string, t *testing.T) {
+		for i := 0; i < 100; i++ {
+			request := fmt.Sprintf("{\"name\":\"foo-%d\",\"callback\":\"baz\"}", i)
+			errorGroup.Go(func() error {
+				r, err := http.Post(url+"/register", "application/json", bytes.NewReader([]byte(request)))
+				if err != nil {
+					return err
+				}
+				if r.StatusCode != 204 {
+					return fmt.Errorf("Wrong status code from /register %d expected 204", r.StatusCode)
+				}
+
+				return nil
+			})
+		}
+
+		resultingError := errorGroup.Wait()
+		if resultingError != nil {
+			t.Fatal(resultingError)
+		}
+	})
 }
 
 func register(url string, u upstream, t *testing.T) {

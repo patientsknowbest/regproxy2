@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	dnscache "go.mercari.io/go-dnscache"
@@ -34,6 +35,7 @@ func errResp(resp http.ResponseWriter, e error) {
 type RegProxy struct {
 	client    *http.Client
 	upstreams map[string]*url.URL
+	writeLock sync.Mutex
 	handler   http.Handler
 }
 
@@ -130,6 +132,9 @@ func (self *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 		badRequest(resp, err.Error())
 		return
 	}
+
+	self.writeLock.Lock()
+	defer self.writeLock.Unlock()
 	log.Printf("Adding upstream %v", q)
 	self.upstreams[q.Name] = upstream
 	resp.WriteHeader(204)
