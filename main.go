@@ -59,8 +59,24 @@ type RegStorageFile struct {
 }
 
 func NewRegStorageFile(fileName string) (*RegStorageFile, error) {
-	if err := os.WriteFile(fileName, []byte{}, os.ModePerm); err != nil {
+	content, err := os.ReadFile(fileName)
+	if os.IsNotExist(err) {
+		if err := os.WriteFile(fileName, []byte{}, os.ModePerm); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
+	}
+	upstreams, err := parseMap(content)
+	if err != nil {
+		return nil, err
+	}
+	for name, u := range upstreams {
+		ups := upstream{
+			Name:     name,
+			Callback: u.String(),
+		}
+		log.Printf("Adding upstream from file %v", ups)
 	}
 	return &RegStorageFile{fileName: fileName}, nil
 }
@@ -88,6 +104,10 @@ func (m *RegStorageFile) All() (map[string]*url.URL, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseMap(file)
+}
+
+func parseMap(file []byte) (map[string]*url.URL, error) {
 	scan := bufio.NewScanner(bytes.NewReader(file))
 	res := make(map[string]*url.URL)
 	for scan.Scan() {

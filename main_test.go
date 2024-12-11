@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"golang.org/x/sync/errgroup"
+	"io"
 	"io/ioutil"
 	"math/rand"
 	"net/http"
@@ -110,48 +111,46 @@ func register(url string, u upstream, t *testing.T) {
 }
 
 func TestHappyPath(t *testing.T) {
-	withRegProxy(t, doTestHappyPath)
-}
+	withRegProxy(t, func(url string, t *testing.T) {
+		// GIVEN
+		testResponse := "foo"
+		handler := http.HandlerFunc(func(rr http.ResponseWriter, req *http.Request) {
+			rr.Write([]byte(testResponse))
+		})
+		testServer1 := httptest.NewServer(handler)
+		testServer2 := httptest.NewServer(handler)
+		defer testServer1.Close()
+		defer testServer2.Close()
+		us1 := upstream{
+			Name:     "foo",
+			Callback: testServer1.URL,
+		}
+		us2 := upstream{
+			Name:     "bar",
+			Callback: testServer2.URL,
+		}
+		register(url, us1, t)
+		register(url, us2, t)
 
-func doTestHappyPath(url string, t *testing.T) {
-	// GIVEN
-	testResponse := "foo"
-	handler := http.HandlerFunc(func(rr http.ResponseWriter, req *http.Request) {
-		rr.Write([]byte(testResponse))
+		// WHEN
+		r, err := http.Get(url)
+
+		// THEN
+		if r.StatusCode != 200 {
+			t.Errorf("expected 200, got %v", r.StatusCode)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = ioutil.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		/*rbs := string(rb)
+		if rbs != testResponse {
+			t.Errorf("Expected %v, but got %v", testResponse, rbs)
+		}*/
 	})
-	testServer1 := httptest.NewServer(handler)
-	testServer2 := httptest.NewServer(handler)
-	defer testServer1.Close()
-	defer testServer2.Close()
-	us1 := upstream{
-		Name:     "foo",
-		Callback: testServer1.URL,
-	}
-	us2 := upstream{
-		Name:     "bar",
-		Callback: testServer2.URL,
-	}
-	register(url, us1, t)
-	register(url, us2, t)
-
-	// WHEN
-	r, err := http.Get(url)
-
-	// THEN
-	if r.StatusCode != 200 {
-		t.Errorf("expected 200, got %v", r.StatusCode)
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = ioutil.ReadAll(r.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	/*rbs := string(rb)
-	if rbs != testResponse {
-		t.Errorf("Expected %v, but got %v", testResponse, rbs)
-	}*/
 }
 
 func TestOneFail(t *testing.T) {
@@ -257,11 +256,31 @@ func TestTimeout(t *testing.T) {
 }
 
 func TestFileStorage(t *testing.T) {
+	// Storage location
 	file := path.Join(os.TempDir(), "regproxy2_test_"+strconv.Itoa(int(rand.Uint32())))
 	defer func(name string) {
 		_ = os.Remove(name)
 	}(file)
 
+	// GIVEN test servers running
+	testResponse := "foo"
+	handler := http.HandlerFunc(func(rr http.ResponseWriter, req *http.Request) {
+		rr.Write([]byte(testResponse))
+	})
+	testServer1 := httptest.NewServer(handler)
+	testServer2 := httptest.NewServer(handler)
+	defer testServer1.Close()
+	defer testServer2.Close()
+	us1 := upstream{
+		Name:     "foo",
+		Callback: testServer1.URL,
+	}
+	us2 := upstream{
+		Name:     "bar",
+		Callback: testServer2.URL,
+	}
+
+	// Test 1, start regproxy, register and check callbacks
 	clientHttpTimeout := 1 * time.Second
 	clientDialTimeout := 1 * time.Second
 	clientKeepAliveInterval := -1 * time.Second
@@ -270,20 +289,72 @@ func TestFileStorage(t *testing.T) {
 	useDnsCache := true
 	dnsCacheRefresh := 100 * time.Hour
 	dnsLookupTimeout := 5 * time.Second
-	st, err := NewRegStorageFile(file)
-	if err != nil {
-		t.Fatal(err)
+	{
+		st, err := NewRegStorageFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rp := NewRegProxy(&clientHttpTimeout,
+			&clientDialTimeout,
+			&clientKeepAliveInterval,
+			&dnsCacheRefresh,
+			&dnsLookupTimeout,
+			&clientMaxIdleTimeout,
+			&clientMaxIdleConnections,
+			&useDnsCache,
+			st)
+		srv := httptest.NewServer(rp.handler)
+		defer srv.Close()
+
+		register(srv.URL, us1, t)
+		register(srv.URL, us2, t)
+
+		// WHEN
+		r, err := http.Get(srv.URL)
+
+		// THEN
+		if r.StatusCode != 200 {
+			t.Errorf("expected 200, got %v", r.StatusCode)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	rp := NewRegProxy(&clientHttpTimeout,
-		&clientDialTimeout,
-		&clientKeepAliveInterval,
-		&dnsCacheRefresh,
-		&dnsLookupTimeout,
-		&clientMaxIdleTimeout,
-		&clientMaxIdleConnections,
-		&useDnsCache,
-		st)
-	srv := httptest.NewServer(rp.handler)
-	defer srv.Close()
-	doTestHappyPath(srv.URL, t)
+	// Test 2, restart regproxy but don't register, check persisted callbacks are used
+	{
+		st, err := NewRegStorageFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rp := NewRegProxy(&clientHttpTimeout,
+			&clientDialTimeout,
+			&clientKeepAliveInterval,
+			&dnsCacheRefresh,
+			&dnsLookupTimeout,
+			&clientMaxIdleTimeout,
+			&clientMaxIdleConnections,
+			&useDnsCache,
+			st)
+		srv := httptest.NewServer(rp.handler)
+		defer srv.Close()
+
+		// WHEN
+		r, err := http.Get(srv.URL)
+
+		// THEN
+		if r.StatusCode != 200 {
+			t.Errorf("expected 200, got %v", r.StatusCode)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 }
