@@ -1,20 +1,25 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	dnscache "go.mercari.io/go-dnscache"
+	"go.mercari.io/go-dnscache"
 	"go.uber.org/zap"
 )
 
@@ -24,27 +29,99 @@ func isSuccess(r *http.Response) bool {
 
 func badRequest(resp http.ResponseWriter, errMsg string) {
 	resp.WriteHeader(400)
-	resp.Write([]byte(errMsg))
+	_, _ = resp.Write([]byte(errMsg))
 }
 
 func errResp(resp http.ResponseWriter, e error) {
 	resp.WriteHeader(500)
-	resp.Write([]byte(e.Error()))
+	_, _ = resp.Write([]byte(e.Error()))
+}
+
+type RegStorage interface {
+	Put(string, *url.URL) error
+	All() (map[string]*url.URL, error)
+}
+
+type RegStorageMemory struct {
+	upstreams map[string]*url.URL
+}
+
+func (m *RegStorageMemory) Put(name string, url *url.URL) error {
+	m.upstreams[name] = url
+	return nil
+}
+func (m *RegStorageMemory) All() (map[string]*url.URL, error) {
+	return maps.Clone(m.upstreams), nil
+}
+
+type RegStorageFile struct {
+	fileName string
+}
+
+func NewRegStorageFile(fileName string) (*RegStorageFile, error) {
+	if err := os.WriteFile(fileName, []byte{}, os.ModePerm); err != nil {
+		return nil, err
+	}
+	return &RegStorageFile{fileName: fileName}, nil
+}
+
+func (m *RegStorageFile) Put(name string, url *url.URL) error {
+	mm, err := m.All()
+	if err != nil {
+		return err
+	}
+	mm[name] = url
+	return m.write(mm)
+}
+func (m *RegStorageFile) write(content map[string]*url.URL) error {
+	sb := strings.Builder{}
+	for name, u := range content {
+		sb.WriteString(name)
+		sb.WriteString("=")
+		sb.WriteString(u.String())
+		sb.WriteString("\n")
+	}
+	return os.WriteFile(m.fileName, []byte(sb.String()), os.ModePerm)
+}
+func (m *RegStorageFile) All() (map[string]*url.URL, error) {
+	file, err := os.ReadFile(m.fileName)
+	if err != nil {
+		return nil, err
+	}
+	scan := bufio.NewScanner(bytes.NewReader(file))
+	res := make(map[string]*url.URL)
+	for scan.Scan() {
+		strs := strings.Split(scan.Text(), "=")
+		if len(strs) != 2 {
+			return nil, errors.New(fmt.Sprintf("corrupt storage, read invalid line [%s]", scan.Text()))
+		}
+		u, err := url.Parse(strs[1])
+		if err != nil {
+			return nil, err
+		}
+		res[strs[0]] = u
+	}
+	return res, nil
 }
 
 type RegProxy struct {
 	client    *http.Client
-	upstreams map[string]*url.URL
+	storage   RegStorage
 	writeLock sync.Mutex
 	handler   http.Handler
 }
 
-func (self *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
+func (p *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 	rc := make(chan *http.Response)
 	ec := make(chan error)
 
 	// Validate the request
-	if len(self.upstreams) < 1 {
+	upstreams, err := p.storage.All()
+	if err != nil {
+		errResp(resp, err)
+		return
+	}
+	if len(upstreams) < 1 {
 		badRequest(resp, "No upstreams registered")
 		return
 	}
@@ -57,7 +134,7 @@ func (self *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 	}
 
 	// Call upstreams in parallel
-	for name, callback := range self.upstreams {
+	for name, callback := range upstreams {
 		go func(name string, callback *url.URL) {
 			// Note although there is an existing
 			// net/http/httputil.ReverseProxy implementation, it doesn't let us
@@ -69,7 +146,7 @@ func (self *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 			req2.URL.Host = callback.Host
 			req2.URL.Scheme = callback.Scheme
 			log.Printf("Forwarding request %s to upstream %s at %s", req2.URL.Path, name, callback)
-			resp2, err := self.client.Do(req2)
+			resp2, err := p.client.Do(req2)
 
 			if err != nil {
 				log.Printf("Error forwarding request %s to upstream %s at %s: %v", req2.URL.Path, name, callback, err)
@@ -85,7 +162,7 @@ func (self *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 	dc := req.Context().Done()
 	// Wait for _all_ the responses, it's interesting to know which ones succeeded and
 	// which ones failed during a single call.
-	for range self.upstreams {
+	for range upstreams {
 		select {
 		case latest := <-rc:
 			if isSuccess(latest) {
@@ -111,7 +188,7 @@ func (self *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 		rr = latestErr
 	}
 	resp.WriteHeader(rr.StatusCode)
-	rr.Write(resp)
+	_ = rr.Write(resp)
 }
 
 type upstream struct {
@@ -119,7 +196,7 @@ type upstream struct {
 	Callback string `json:"callback"`
 }
 
-func (self *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
+func (p *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 	var q upstream
 	err := json.NewDecoder(req.Body).Decode(&q)
 	if err != nil {
@@ -133,22 +210,29 @@ func (self *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	self.writeLock.Lock()
-	defer self.writeLock.Unlock()
+	p.writeLock.Lock()
+	defer p.writeLock.Unlock()
 	log.Printf("Adding upstream %v", q)
-	self.upstreams[q.Name] = upstream
+	if err := p.storage.Put(q.Name, upstream); err != nil {
+		errResp(resp, err)
+		return
+	}
 	resp.WriteHeader(204)
 }
 
-func (self *RegProxy) health(resp http.ResponseWriter, req *http.Request) {
+func (p *RegProxy) health(resp http.ResponseWriter, _ *http.Request) {
 	// https://inadarei.github.io/rfc-healthcheck/
 	resp.WriteHeader(200)
 	resp.Header().Add("Content-Type", "application/health+json")
-	resp.Write([]byte(`{"status": "pass"}`))
+	_, _ = resp.Write([]byte(`{"status": "pass"}`))
 }
 
-func NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, dnsCacheRefresh, dnsLookupTimeout, clientMaxIdleTimeout *time.Duration,
-	clientMaxIdleConnections *int64, useDnsCachePtr *bool) *RegProxy {
+func NewRegProxy(
+	clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, dnsCacheRefresh, dnsLookupTimeout, clientMaxIdleTimeout *time.Duration,
+	clientMaxIdleConnections *int64,
+	useDnsCachePtr *bool,
+	storage RegStorage,
+) *RegProxy {
 	dc := (&net.Dialer{
 		Timeout:   *clientDialTimeout,
 		KeepAlive: *clientKeepAliveInterval,
@@ -178,8 +262,8 @@ func NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, 
 		Timeout: *clientHttpTimeout,
 	}
 	rp := &RegProxy{
-		upstreams: make(map[string]*url.URL),
-		client:    client,
+		storage: storage,
+		client:  client,
 	}
 	sm := http.NewServeMux()
 	sm.HandleFunc("/health", rp.health)
@@ -202,12 +286,36 @@ func main() {
 	useDnsCachePtr := flag.Bool("use-dns-cache", true, "use an internal DNS cache")
 	dnsCacheRefresh := flag.Duration("dns-cache-refresh", 100*time.Hour, "interval for refrshing DNS cache")
 	dnsLookupTimeout := flag.Duration("dns-lookup-timeout", 5*time.Second, "timeout for DNS lookups")
+	registryStoreLocation := flag.String("storage-location", "memory", "registry data storage file location, or 'memory' for in-memory only")
 	flag.Parse()
 
 	log.Println("Starting regproxy with args")
 	log.Println(os.Args)
 
-	rp := NewRegProxy(clientHttpTimeout, clientDialTimeout, clientKeepAliveInterval, dnsCacheRefresh, dnsLookupTimeout, clientMaxIdleTimeout, clientMaxIdleConnections, useDnsCachePtr)
+	var storage RegStorage
+	if *registryStoreLocation == "memory" {
+		storage = &RegStorageMemory{upstreams: make(map[string]*url.URL)}
+		log.Println("using in-memory storage")
+	} else {
+		st, err := NewRegStorageFile(*registryStoreLocation)
+		if err != nil {
+			log.Fatal(err)
+		}
+		storage = st
+		log.Printf("using file storage at %s\n", *registryStoreLocation)
+	}
+
+	rp := NewRegProxy(
+		clientHttpTimeout,
+		clientDialTimeout,
+		clientKeepAliveInterval,
+		dnsCacheRefresh,
+		dnsLookupTimeout,
+		clientMaxIdleTimeout,
+		clientMaxIdleConnections,
+		useDnsCachePtr,
+		storage,
+	)
 
 	srv := http.Server{
 		Addr:         net.JoinHostPort(*hostPtr, strconv.Itoa(*portPtr)),
