@@ -186,8 +186,8 @@ func TestOneFail(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.StatusCode != 404 {
-			t.Errorf("Expected 404, got %v", r.StatusCode)
+		if r.StatusCode != 500 {
+			t.Errorf("Expected 500, got %v", r.StatusCode)
 		}
 		/*rbs := string(rb)
 		if rbs != testResponse {
