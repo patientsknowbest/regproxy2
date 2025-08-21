@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.mercari.io/go-dnscache"
 	"go.uber.org/zap"
 )
@@ -160,36 +161,38 @@ func (p *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 			// net/http/httputil.ReverseProxy implementation, it doesn't let us
 			// forward to _multiple_ upstreams and choose a response based on header
 			// so we can't use it here unfortunately
+			requestId := uuid.New()
 			req2 := req.Clone(req.Context())
 			req2.RequestURI = "" // Isn't allowed to be set on client requests
 			req2.Body = io.NopCloser(bytes.NewReader(b))
 			req2.URL.Host = callback.Host
 			req2.URL.Scheme = callback.Scheme
-			log.Printf("Forwarding request %s to upstream %s at %s", req2.URL.Path, name, callback)
+			log.Printf("Forwarding request %s (ID %v) to upstream %s at %s", req2.URL.Path, requestId, name, callback)
+			requestStart := time.Now()
 			resp2, err := p.client.Do(req2)
 
+			requestDuration := time.Now().Sub(requestStart)
+
 			if err != nil {
-				log.Printf("Error forwarding request %s to upstream %s at %s: %v", req2.URL.Path, name, callback, err)
+				log.Printf("Error forwarding request %s (ID %v) to upstream %s at %s: %v", req2.URL.Path, requestId, name, callback, err)
 				ec <- err
+			} else if !isSuccess(resp2) {
+				log.Printf("Error forwarding request %s (ID %v) to upstream %s at %s: %v", req2.URL.Path, requestId, name, callback, resp2.StatusCode)
+				ec <- fmt.Errorf("unsuccessful status code for request %s (ID %v): %v", req2.URL.Path, requestId, resp2.StatusCode)
 			} else {
-				log.Printf("Success forwarding request %s to upstream %s at %s: %v", req2.URL.Path, name, callback, resp2.StatusCode)
+				log.Printf("Success forwarding request %s (ID %v) to upstream %s at %s in %v: %v", req2.URL.Path, requestId, name, callback, requestDuration, resp2.StatusCode)
 				rc <- resp2
 			}
 		}(name, callback)
 	}
 	var latestSuccess *http.Response
-	var latestErr *http.Response
 	dc := req.Context().Done()
 	// Wait for _all_ the responses, it's interesting to know which ones succeeded and
 	// which ones failed during a single call.
 	for range upstreams {
 		select {
 		case latest := <-rc:
-			if isSuccess(latest) {
-				latestSuccess = latest
-			} else {
-				latestErr = latest
-			}
+			latestSuccess = latest
 		case e = <-ec:
 		// If our own client cancelled, we should stop waiting
 		case _ = <-dc:
@@ -202,13 +205,10 @@ func (p *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 		errResp(resp, e)
 		return
 	}
-	// Prefer to return non-success responses
-	var rr = latestSuccess
-	if latestErr != nil {
-		rr = latestErr
-	}
-	resp.WriteHeader(rr.StatusCode)
-	_ = rr.Write(resp)
+
+	// Otherwise write latest success
+	resp.WriteHeader(latestSuccess.StatusCode)
+	_ = latestSuccess.Write(resp)
 }
 
 type upstream struct {
