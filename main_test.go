@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"golang.org/x/sync/errgroup"
 	"io"
 	"io/ioutil"
 	"math/rand"
@@ -17,6 +16,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 func withRegProxy(t *testing.T, f func(url string, t *testing.T)) {
@@ -108,6 +109,30 @@ func register(url string, u upstream, t *testing.T) {
 	if r.StatusCode != 204 {
 		t.Fatalf("Failed to register test callback")
 	}
+}
+
+func deregister(url string, u upstream, t *testing.T) {
+	b, _ := json.Marshal(u)
+	r, err := http.Post(url+"/deregister", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.StatusCode != 204 {
+		t.Fatalf("Failed to register test callback")
+	}
+}
+
+func list(u string, t *testing.T) []upstream {
+	r, err := http.Get(u + "/list")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res []upstream
+	err = json.NewDecoder(r.Body).Decode(&res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
 }
 
 func TestHappyPath(t *testing.T) {
@@ -346,15 +371,33 @@ func TestFileStorage(t *testing.T) {
 		r, err := http.Get(srv.URL)
 
 		// THEN
-		if r.StatusCode != 200 {
-			t.Errorf("expected 200, got %v", r.StatusCode)
-		}
 		if err != nil {
 			t.Fatal(err)
+		}
+		if r.StatusCode != 200 {
+			t.Errorf("expected 200, got %v", r.StatusCode)
 		}
 		_, err = io.ReadAll(r.Body)
 		if err != nil {
 			t.Fatal(err)
+		}
+
+		// Deregister a host, verify
+		deregister(srv.URL, upstream{Name: "bar"}, t)
+		lst := list(srv.URL, t)
+		foundFoo, foundBar := false, false
+		for _, l := range lst {
+			if l.Name == "foo" {
+				foundFoo = true
+			} else if l.Name == "bar" {
+				foundBar = true
+			}
+		}
+		if !foundFoo {
+			t.Errorf("list of upstreams didn't contain 'foo'")
+		}
+		if foundBar {
+			t.Errorf("list of upstreams contained 'bar' after we deleted it")
 		}
 	}
 }
