@@ -78,7 +78,7 @@ func NewRegStorageFile(fileName string) (*RegStorageFile, error) {
 		return nil, err
 	}
 	for name, u := range upstreams {
-		ups := upstream{
+		ups := registerRequest{
 			Name:     name,
 			Callback: u.String(),
 		}
@@ -224,13 +224,13 @@ func (p *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 	_ = latestSuccess.Write(resp)
 }
 
-type upstream struct {
+type registerRequest struct {
 	Name     string `json:"name"`
 	Callback string `json:"callback"`
 }
 
 func (p *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
-	var q upstream
+	var q registerRequest
 	err := json.NewDecoder(req.Body).Decode(&q)
 	if err != nil {
 		badRequest(resp, err.Error())
@@ -253,8 +253,12 @@ func (p *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 	resp.WriteHeader(204)
 }
 
+type deregisterRequest struct {
+	Name string `json:"name"`
+}
+
 func (p *RegProxy) deregister(resp http.ResponseWriter, req *http.Request) {
-	var q upstream
+	var q deregisterRequest
 	err := json.NewDecoder(req.Body).Decode(&q)
 	if err != nil {
 		badRequest(resp, err.Error())
@@ -266,6 +270,11 @@ func (p *RegProxy) deregister(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 	resp.WriteHeader(204)
+}
+
+type upstream struct {
+	Name     string `json:"name"`
+	Callback string `json:"callback"`
 }
 
 func (p *RegProxy) list(resp http.ResponseWriter, req *http.Request) {

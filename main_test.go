@@ -100,7 +100,7 @@ func TestConcurrentRegister(t *testing.T) {
 	})
 }
 
-func register(url string, u upstream, t *testing.T) {
+func register(url string, u registerRequest, t *testing.T) {
 	b, _ := json.Marshal(u)
 	r, err := http.Post(url+"/register", "application/json", bytes.NewReader(b))
 	if err != nil {
@@ -111,7 +111,7 @@ func register(url string, u upstream, t *testing.T) {
 	}
 }
 
-func deregister(url string, u upstream, t *testing.T) {
+func deregister(url string, u deregisterRequest, t *testing.T) {
 	b, _ := json.Marshal(u)
 	r, err := http.Post(url+"/deregister", "application/json", bytes.NewReader(b))
 	if err != nil {
@@ -146,11 +146,11 @@ func TestHappyPath(t *testing.T) {
 		testServer2 := httptest.NewServer(handler)
 		defer testServer1.Close()
 		defer testServer2.Close()
-		us1 := upstream{
+		us1 := registerRequest{
 			Name:     "foo",
 			Callback: testServer1.URL,
 		}
-		us2 := upstream{
+		us2 := registerRequest{
 			Name:     "bar",
 			Callback: testServer2.URL,
 		}
@@ -193,11 +193,11 @@ func TestOneFail(t *testing.T) {
 		testServer2 := httptest.NewServer(handlerErr)
 		defer testServer1.Close()
 		defer testServer2.Close()
-		us1 := upstream{
+		us1 := registerRequest{
 			Name:     "foo",
 			Callback: testServer1.URL,
 		}
-		us2 := upstream{
+		us2 := registerRequest{
 			Name:     "bar",
 			Callback: testServer2.URL,
 		}
@@ -224,7 +224,7 @@ func TestOneFail(t *testing.T) {
 func TestNoSuchHost(t *testing.T) {
 	withRegProxy(t, func(url string, t *testing.T) {
 		// GIVEN
-		register(url, upstream{
+		register(url, registerRequest{
 			Name:     "foo",
 			Callback: "http://seriously.not.a.top.level.domain",
 		}, t)
@@ -256,11 +256,11 @@ func TestTimeout(t *testing.T) {
 		testServer2 := httptest.NewServer(handler2)
 		defer testServer1.Close()
 		defer testServer2.Close()
-		us1 := upstream{
+		us1 := registerRequest{
 			Name:     "foo",
 			Callback: testServer1.URL,
 		}
-		us2 := upstream{
+		us2 := registerRequest{
 			Name:     "bar",
 			Callback: testServer2.URL,
 		}
@@ -296,11 +296,11 @@ func TestFileStorage(t *testing.T) {
 	testServer2 := httptest.NewServer(handler)
 	defer testServer1.Close()
 	defer testServer2.Close()
-	us1 := upstream{
+	us1 := registerRequest{
 		Name:     "foo",
 		Callback: testServer1.URL,
 	}
-	us2 := upstream{
+	us2 := registerRequest{
 		Name:     "bar",
 		Callback: testServer2.URL,
 	}
@@ -383,7 +383,7 @@ func TestFileStorage(t *testing.T) {
 		}
 
 		// Deregister a host, verify
-		deregister(srv.URL, upstream{Name: "bar"}, t)
+		deregister(srv.URL, deregisterRequest{Name: "bar"}, t)
 		lst := list(srv.URL, t)
 		foundFoo, foundBar := false, false
 		for _, l := range lst {
