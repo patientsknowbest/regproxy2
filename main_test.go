@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -385,19 +386,6 @@ func TestFileStorage(t *testing.T) {
 		// Deregister a host, verify
 		deregister(srv.URL, deregisterRequest{Name: "bar"}, t)
 		lst := list(srv.URL, t)
-		foundFoo, foundBar := false, false
-		for _, l := range lst {
-			if l.Name == "foo" {
-				foundFoo = true
-			} else if l.Name == "bar" {
-				foundBar = true
-			}
-		}
-		if !foundFoo {
-			t.Errorf("list of upstreams didn't contain 'foo'")
-		}
-		if foundBar {
-			t.Errorf("list of upstreams contained 'bar' after we deleted it")
-		}
+		assert.Equal(t, []upstream{{us1.Name, us1.Callback}}, lst)
 	}
 }
