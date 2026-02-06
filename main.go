@@ -264,6 +264,8 @@ func (p *RegProxy) deregister(resp http.ResponseWriter, req *http.Request) {
 		badRequest(resp, err.Error())
 		return
 	}
+	p.writeLock.Lock()
+	defer p.writeLock.Unlock()
 	log.Printf("Removing upstream %v", q)
 	if err := p.storage.Remove(q.Name); err != nil {
 		errResp(resp, err)
@@ -278,6 +280,8 @@ type upstream struct {
 }
 
 func (p *RegProxy) list(resp http.ResponseWriter, req *http.Request) {
+	p.writeLock.Lock()
+	defer p.writeLock.Unlock()
 	all, err := p.storage.All()
 	if err != nil {
 		errResp(resp, err)
