@@ -12,7 +12,7 @@ It can be used to implement a control plane for a dynamic set of services, where
 errors must be highlighted to the caller rather than ignored.
 
 ## Prerequisites
-* go >= 1.22
+* go >= 1.24
 * OR docker
 
 ## Instructions

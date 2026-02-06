@@ -1,4 +1,4 @@
-FROM golang:1.22.5 AS builder
+FROM golang:1.24.0 AS builder
 WORKDIR /build
 # Separate dependency caching from compilation
 COPY go.mod go.mod 

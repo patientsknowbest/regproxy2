@@ -101,6 +101,68 @@ func TestConcurrentRegister(t *testing.T) {
 	})
 }
 
+func TestConcurrentRegisterAndDeregister(t *testing.T) {
+	errorGroup, _ := errgroup.WithContext(t.Context())
+	errorGroupDeregister, _ := errgroup.WithContext(t.Context())
+
+	withRegProxy(t, func(url string, t *testing.T) {
+		created := make(chan string, 100)
+		for i := range 100 {
+			name := fmt.Sprintf("foo-%d", i)
+			request := fmt.Sprintf("{\"name\":\"%s\",\"callback\":\"baz\"}", name)
+			errorGroup.Go(func() error {
+				r, err := http.Post(url+"/register", "application/json", bytes.NewReader([]byte(request)))
+				if err != nil {
+					if i == 100 {
+						close(created)
+					}
+					return err
+				}
+				if r.StatusCode != 204 {
+					if i == 100 {
+						close(created)
+					}
+					return fmt.Errorf("Wrong status code from /register %d expected 204", r.StatusCode)
+				}
+				created <- name
+
+				if i == 100 {
+					close(created)
+				}
+				return nil
+			})
+		}
+
+		go func() {
+			for name := range created {
+				request := fmt.Sprintf("{\"name\":\"%s\"}", name)
+
+				errorGroupDeregister.Go(func() error {
+					r, err := http.Post(url+"/deregister", "application/json", bytes.NewReader([]byte(request)))
+					if err != nil {
+						return err
+					}
+					if r.StatusCode != 204 {
+						return fmt.Errorf("Wrong status code from /deregister %d expected 204", r.StatusCode)
+					}
+
+					return nil
+				})
+			}
+		}()
+
+		resultingError := errorGroup.Wait()
+		if resultingError != nil {
+			t.Fatal(resultingError)
+		}
+
+		resultingError = errorGroupDeregister.Wait()
+		if resultingError != nil {
+			t.Fatal(resultingError)
+		}
+	})
+}
+
 func register(url string, u registerRequest, t *testing.T) {
 	b, _ := json.Marshal(u)
 	r, err := http.Post(url+"/register", "application/json", bytes.NewReader(b))
