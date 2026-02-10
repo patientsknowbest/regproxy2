@@ -40,6 +40,7 @@ func errResp(resp http.ResponseWriter, e error) {
 
 type RegStorage interface {
 	Put(string, *url.URL) error
+	Remove(string) error
 	All() (map[string]*url.URL, error)
 }
 
@@ -49,6 +50,10 @@ type RegStorageMemory struct {
 
 func (m *RegStorageMemory) Put(name string, url *url.URL) error {
 	m.upstreams[name] = url
+	return nil
+}
+func (m *RegStorageMemory) Remove(name string) error {
+	delete(m.upstreams, name)
 	return nil
 }
 func (m *RegStorageMemory) All() (map[string]*url.URL, error) {
@@ -73,7 +78,7 @@ func NewRegStorageFile(fileName string) (*RegStorageFile, error) {
 		return nil, err
 	}
 	for name, u := range upstreams {
-		ups := upstream{
+		ups := registerRequest{
 			Name:     name,
 			Callback: u.String(),
 		}
@@ -88,6 +93,14 @@ func (m *RegStorageFile) Put(name string, url *url.URL) error {
 		return err
 	}
 	mm[name] = url
+	return m.write(mm)
+}
+func (m *RegStorageFile) Remove(name string) error {
+	mm, err := m.All()
+	if err != nil {
+		return err
+	}
+	delete(mm, name)
 	return m.write(mm)
 }
 func (m *RegStorageFile) write(content map[string]*url.URL) error {
@@ -211,13 +224,13 @@ func (p *RegProxy) proxy(resp http.ResponseWriter, req *http.Request) {
 	_ = latestSuccess.Write(resp)
 }
 
-type upstream struct {
+type registerRequest struct {
 	Name     string `json:"name"`
 	Callback string `json:"callback"`
 }
 
 func (p *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
-	var q upstream
+	var q registerRequest
 	err := json.NewDecoder(req.Body).Decode(&q)
 	if err != nil {
 		badRequest(resp, err.Error())
@@ -238,6 +251,51 @@ func (p *RegProxy) register(resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 	resp.WriteHeader(204)
+}
+
+type deregisterRequest struct {
+	Name string `json:"name"`
+}
+
+func (p *RegProxy) deregister(resp http.ResponseWriter, req *http.Request) {
+	var q deregisterRequest
+	err := json.NewDecoder(req.Body).Decode(&q)
+	if err != nil {
+		badRequest(resp, err.Error())
+		return
+	}
+	p.writeLock.Lock()
+	defer p.writeLock.Unlock()
+	log.Printf("Removing upstream %v", q)
+	if err := p.storage.Remove(q.Name); err != nil {
+		errResp(resp, err)
+		return
+	}
+	resp.WriteHeader(204)
+}
+
+type upstream struct {
+	Name     string `json:"name"`
+	Callback string `json:"callback"`
+}
+
+func (p *RegProxy) list(resp http.ResponseWriter, req *http.Request) {
+	p.writeLock.Lock()
+	defer p.writeLock.Unlock()
+	all, err := p.storage.All()
+	if err != nil {
+		errResp(resp, err)
+		return
+	}
+	var res []upstream
+	for k, v := range all {
+		res = append(res, upstream{Name: k, Callback: v.String()})
+	}
+	resp.WriteHeader(200)
+	err = json.NewEncoder(resp).Encode(res)
+	if err != nil {
+		log.Printf("error writing response %v", err)
+	}
 }
 
 func (p *RegProxy) health(resp http.ResponseWriter, _ *http.Request) {
@@ -288,6 +346,8 @@ func NewRegProxy(
 	sm := http.NewServeMux()
 	sm.HandleFunc("/health", rp.health)
 	sm.HandleFunc("/register", rp.register)
+	sm.HandleFunc("/deregister", rp.deregister)
+	sm.HandleFunc("/list", rp.list)
 	sm.HandleFunc("/", rp.proxy)
 	rp.handler = sm
 	return rp
