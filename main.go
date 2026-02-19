@@ -332,10 +332,13 @@ func NewRegProxy(
 	}
 	client := &http.Client{
 		Transport: &http.Transport{
-			Proxy:           http.ProxyFromEnvironment,
-			DialContext:     dc,
-			MaxIdleConns:    int(*clientMaxIdleConnections),
-			IdleConnTimeout: *clientMaxIdleTimeout,
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           dc,
+			ForceAttemptHTTP2:     false,
+			MaxIdleConns:          int(*clientMaxIdleConnections),
+			IdleConnTimeout:       *clientMaxIdleTimeout,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
 		},
 		Timeout: *clientHttpTimeout,
 	}
@@ -359,10 +362,10 @@ func main() {
 	serverReadTimeout := flag.Duration("server-read-timeout", 1*time.Second, "server read timeout")
 	serverWriteTimeout := flag.Duration("server-write-timeout", 40*time.Second, "server write timeout")
 	clientHttpTimeout := flag.Duration("client-http-timeout", 40*time.Second, "client timeout (for upstreams)")
-	clientDialTimeout := flag.Duration("client-dial-timeout", 1*time.Second, "client dialer timeout")
-	clientKeepAliveInterval := flag.Duration("client-keep-alive-interval", -1*time.Second, "client keep-alive interval")
-	clientMaxIdleConnections := flag.Int64("client-max-idle-conns", 1, "client max idle connections (for connection pooling)")
-	clientMaxIdleTimeout := flag.Duration("client-max-idle-timeout", 1*time.Second, "client idle connection timeout (for connection pooling)")
+	clientDialTimeout := flag.Duration("client-dial-timeout", 30*time.Second, "client dialer timeout")
+	clientKeepAliveInterval := flag.Duration("client-keep-alive-interval", 30*time.Second, "client keep-alive interval")
+	clientMaxIdleConnections := flag.Int64("client-max-idle-conns", 100, "client max idle connections (for connection pooling)")
+	clientMaxIdleTimeout := flag.Duration("client-max-idle-timeout", 90*time.Second, "client idle connection timeout (for connection pooling)")
 	useDnsCachePtr := flag.Bool("use-dns-cache", true, "use an internal DNS cache")
 	dnsCacheRefresh := flag.Duration("dns-cache-refresh", 100*time.Hour, "interval for refrshing DNS cache")
 	dnsLookupTimeout := flag.Duration("dns-lookup-timeout", 5*time.Second, "timeout for DNS lookups")
